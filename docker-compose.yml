@@ -1,0 +1,50 @@
+# Local development infrastructure for SeatRush.
+#
+# Only PostgreSQL and Redis are defined here on purpose: the API and web app run
+# on the host via `pnpm dev` so reloads are instant. See README.md.
+#
+# The credentials below are well-known LOCAL DEVELOPMENT DEFAULTS, not secrets.
+# Override them with a root `.env` file (git-ignored) if you prefer other values.
+name: seatrush
+
+services:
+  postgres:
+    image: postgres:16-alpine
+    container_name: seatrush-postgres
+    restart: unless-stopped
+    environment:
+      POSTGRES_USER: ${POSTGRES_USER:-seatrush}
+      POSTGRES_DB: ${POSTGRES_DB:-seatrush}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-seatrush_dev_password}
+    ports:
+      - '${POSTGRES_PORT:-5432}:5432'
+    volumes:
+      # Named volume => database survives `docker compose down`.
+      - seatrush-postgres-data:/var/lib/postgresql/data
+    healthcheck:
+      test: ['CMD-SHELL', 'pg_isready -U ${POSTGRES_USER:-seatrush} -d ${POSTGRES_DB:-seatrush}']
+      interval: 5s
+      timeout: 5s
+      retries: 10
+      start_period: 10s
+
+  redis:
+    image: redis:7-alpine
+    container_name: seatrush-redis
+    restart: unless-stopped
+    command: ['redis-server', '--appendonly', 'yes']
+    ports:
+      - '${REDIS_PORT:-6379}:6379'
+    volumes:
+      # Named volume => AOF data survives `docker compose down`.
+      - seatrush-redis-data:/data
+    healthcheck:
+      test: ['CMD', 'redis-cli', 'ping']
+      interval: 5s
+      timeout: 5s
+      retries: 10
+      start_period: 5s
+
+volumes:
+  seatrush-postgres-data:
+  seatrush-redis-data:
