@@ -1,0 +1,229 @@
+// SeatRush database schema.
+//
+// Conventions (AGENTS.md): PascalCase model/type names, snake_case tables and
+// columns (via @map / @@map), TypeScript-facing fields in camelCase.
+//
+// Two decisions in here are deliberate and explained in docs/adr/0002:
+//  1. booking_seats.status is denormalized from bookings.status so the
+//     partial unique index is a pure expression on booking_seats (no join).
+//  2. Money is stored as integer paise, never floats.
+
+generator client {
+  provider = "prisma-client-js"
+}
+
+datasource db {
+  provider = "postgresql"
+  url      = env("DATABASE_URL")
+}
+
+enum UserRole {
+  CUSTOMER
+  ADMIN
+}
+
+enum SeatCategory {
+  REGULAR
+  PREMIUM
+  RECLINER
+}
+
+enum BookingStatus {
+  PENDING
+  CONFIRMED
+  EXPIRED
+  CANCELLED
+  REFUND_REQUIRED
+}
+
+enum PaymentStatus {
+  CREATED
+  SUCCEEDED
+  FAILED
+  REFUNDED
+}
+
+/// A person who can book seats. Phase 2 adds authentication.
+model User {
+  id           String   @id @default(uuid()) @db.Uuid
+  email        String   @unique
+  passwordHash String   @map("password_hash")
+  displayName  String   @map("display_name")
+  role         UserRole @default(CUSTOMER)
+  createdAt    DateTime @default(now()) @map("created_at") @db.Timestamptz(3)
+  updatedAt    DateTime @updatedAt @map("updated_at") @db.Timestamptz(3)
+
+  bookings Booking[]
+
+  @@map("users")
+}
+
+/// A cinema / venue building.
+model Venue {
+  id        String   @id @default(uuid()) @db.Uuid
+  name      String
+  address   String
+  city      String
+  createdAt DateTime @default(now()) @map("created_at") @db.Timestamptz(3)
+  updatedAt DateTime @updatedAt @map("updated_at") @db.Timestamptz(3)
+
+  screens Screen[]
+
+  @@map("venues")
+}
+
+/// A single auditorium inside a venue. Seat layout belongs to the screen.
+model Screen {
+  id        String   @id @default(uuid()) @db.Uuid
+  venueId   String   @map("venue_id") @db.Uuid
+  name      String
+  createdAt DateTime @default(now()) @map("created_at") @db.Timestamptz(3)
+  updatedAt DateTime @updatedAt @map("updated_at") @db.Timestamptz(3)
+
+  venue Venue  @relation(fields: [venueId], references: [id], onDelete: Cascade)
+  seats Seat[]
+  shows Show[]
+
+  @@unique([venueId, name], map: "screens_venue_id_name_key")
+  @@map("screens")
+}
+
+/// One physical seat in a screen's layout. Static data; never changes per show.
+model Seat {
+  id         String       @id @default(uuid()) @db.Uuid
+  screenId   String       @map("screen_id") @db.Uuid
+  rowLabel   String       @map("row_label")
+  seatNumber Int          @map("seat_number")
+  category   SeatCategory
+  createdAt  DateTime     @default(now()) @map("created_at") @db.Timestamptz(3)
+
+  screen       Screen        @relation(fields: [screenId], references: [id], onDelete: Cascade)
+  bookingSeats BookingSeat[]
+
+  // A seat number must be unique within its row; this also makes the seed
+  // idempotent (upsert on screenId + rowLabel + seatNumber).
+  @@unique([screenId, rowLabel, seatNumber], map: "seats_screen_id_row_label_seat_number_key")
+  @@index([screenId])
+  @@map("seats")
+}
+
+/// A movie/event screening in a screen at a fixed time.
+model Show {
+  id        String   @id @default(uuid()) @db.Uuid
+  title     String
+  synopsis  String?
+  screenId  String   @map("screen_id") @db.Uuid
+  startTime DateTime @map("start_time") @db.Timestamptz(3)
+  createdAt DateTime @default(now()) @map("created_at") @db.Timestamptz(3)
+  updatedAt DateTime @updatedAt @map("updated_at") @db.Timestamptz(3)
+
+  screen       Screen        @relation(fields: [screenId], references: [id], onDelete: Cascade)
+  prices       ShowPrice[]
+  bookings     Booking[]
+  bookingSeats BookingSeat[]
+
+  @@index([startTime])
+  @@index([screenId, startTime])
+  @@map("shows")
+}
+
+/// Price of one seat category for one show, stored in integer paise.
+/// Integer minor units avoid floating-point rounding on money (ADR 0002).
+model ShowPrice {
+  id          String       @id @default(uuid()) @db.Uuid
+  showId      String       @map("show_id") @db.Uuid
+  category    SeatCategory
+  amountPaise Int          @map("amount_paise")
+  createdAt   DateTime     @default(now()) @map("created_at") @db.Timestamptz(3)
+
+  show Show @relation(fields: [showId], references: [id], onDelete: Cascade)
+
+  @@unique([showId, category], map: "show_prices_show_id_category_key")
+  @@map("show_prices")
+}
+
+/// A user's intent to buy specific seats for a show.
+/// Created as PENDING at checkout; becomes CONFIRMED after payment success.
+model Booking {
+  id               String        @id @default(uuid()) @db.Uuid
+  userId           String        @map("user_id") @db.Uuid
+  showId           String        @map("show_id") @db.Uuid
+  status           BookingStatus @default(PENDING)
+  totalAmountPaise Int           @map("total_amount_paise")
+  /// Server-generated deadline. Never derived from a client clock (invariant 7).
+  expiresAt        DateTime      @map("expires_at") @db.Timestamptz(3)
+  createdAt        DateTime      @default(now()) @map("created_at") @db.Timestamptz(3)
+  updatedAt        DateTime      @updatedAt @map("updated_at") @db.Timestamptz(3)
+
+  user     User          @relation(fields: [userId], references: [id], onDelete: Restrict)
+  show     Show          @relation(fields: [showId], references: [id], onDelete: Restrict)
+  seats    BookingSeat[]
+  payments Payment[]
+
+  @@index([showId, status])
+  @@index([userId, createdAt])
+  @@map("bookings")
+}
+
+/// The seat-level rows of a booking.
+///
+/// `status` is denormalized from Booking.status and kept in sync inside the same
+/// transaction. This is what allows the double-booking guard to be a plain
+/// partial unique index on THIS table alone:
+///
+///   CREATE UNIQUE INDEX booking_seats_active_show_seat_key
+///     ON booking_seats (show_id, seat_id)
+///     WHERE status IN ('PENDING', 'CONFIRMED');
+///
+/// It lives in a hand-written migration because Prisma's schema language cannot
+/// express a partial index. See docs/adr/0002.
+model BookingSeat {
+  id         String        @id @default(uuid()) @db.Uuid
+  bookingId  String        @map("booking_id") @db.Uuid
+  showId     String        @map("show_id") @db.Uuid
+  seatId     String        @map("seat_id") @db.Uuid
+  status     BookingStatus
+  /// Price locked in at booking time, in paise (prices can change per show).
+  pricePaise Int           @map("price_paise")
+  createdAt  DateTime      @default(now()) @map("created_at") @db.Timestamptz(3)
+
+  booking Booking @relation(fields: [bookingId], references: [id], onDelete: Cascade)
+  show    Show    @relation(fields: [showId], references: [id], onDelete: Restrict)
+  seat    Seat    @relation(fields: [seatId], references: [id], onDelete: Restrict)
+
+  @@index([bookingId])
+  @@index([showId, status])
+  @@map("booking_seats")
+}
+
+/// A payment attempt for a booking. Phase 6 implements the gateway.
+model Payment {
+  id             String        @id @default(uuid()) @db.Uuid
+  bookingId      String        @map("booking_id") @db.Uuid
+  providerRef    String        @map("provider_ref")
+  status         PaymentStatus @default(CREATED)
+  /// Unique key that makes webhook/confirm processing idempotent (invariant 8).
+  idempotencyKey String        @unique @map("idempotency_key")
+  amountPaise    Int           @map("amount_paise")
+  createdAt      DateTime      @default(now()) @map("created_at") @db.Timestamptz(3)
+  updatedAt      DateTime      @updatedAt @map("updated_at") @db.Timestamptz(3)
+
+  booking Booking @relation(fields: [bookingId], references: [id], onDelete: Restrict)
+
+  @@index([bookingId])
+  @@map("payments")
+}
+
+/// Every webhook event that has already been handled.
+/// The unique event_id is the idempotency guarantee (invariant 8): a duplicate
+/// delivery fails the insert, and the handler recognises it as "already done".
+model ProcessedWebhook {
+  id          String   @id @default(uuid()) @db.Uuid
+  eventId     String   @unique @map("event_id")
+  provider    String
+  eventType   String   @map("event_type")
+  payload     Json
+  processedAt DateTime @default(now()) @map("processed_at") @db.Timestamptz(3)
+
+  @@map("processed_webhooks")
+}
