@@ -26,3 +26,6 @@ Each file is `NNNN-short-kebab-title.md` and contains:
 Write an ADR when a decision would be hard to justify in a code review alone:
 concurrency and locking strategy, transaction isolation level, cache invalidation,
 ORM choice, or anything that constrains a later phase.
+@@
+| [0003](0003-authentication.md) | Authentication design | Accepted | 2 |
+| [0004](0004-seat-hold-locking-strategy.md) | Seat-hold locking strategy | Accepted | 3 |

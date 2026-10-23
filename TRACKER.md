@@ -3,7 +3,7 @@
 Live progress tracker for SeatRush. Update this file after each task and at the end of every phase.
 
 **Working mode:** Fresh restart from Phase 0. Implement and learn one phase at a time, using Codex for implementation and ChatGPT for review/explanation.
-**Current phase:** Phase 2 — Authentication (implemented and locally verified; awaiting user review)
+**Current phase:** Phase 3 — Redis Seat Hold (implemented and locally verified; awaiting user review)
 **Last updated:** 2026-10-23
 **Status legend:** `[ ]` not started, `[~]` in progress, `[x]` implemented and verified
 
@@ -248,14 +248,90 @@ Tests added in Phase 2 (against real PostgreSQL in the isolated `seatrush_test` 
   cookie-parser (the Fastify plugin covers it), no frontend auth.
 
 ## Phase 3: Redis Seat Hold (Core)
-- [ ] Redis key design + constants
-- [ ] Lua: atomic multi-seat hold (all-or-nothing)
-- [ ] Lua: owner-only release
-- [ ] `POST /shows/:id/holds` (max 6 seats, 10 min TTL)
-- [ ] `DELETE /holds/:holdId`
-- [ ] Seat status merge (Postgres BOOKED + Redis HELD) in seat snapshot API
-- [ ] Concurrency tests (N parallel -> exactly 1 success)
-- [ ] ADR: locking strategy (why Lua, why not Redlock)
+
+- [x] Redis key design + constants (`hold:{showId}:{seatId}`, `hold_meta:{holdId}`, `user_holds:{userId}:{showId}`) in `lib/redis-keys.ts`
+- [x] Lua: atomic multi-seat hold (all-or-nothing) — `ACQUIRE_HOLD_SCRIPT`
+- [x] Lua: owner-only release (compare-and-delete) — `RELEASE_HOLD_SCRIPT`
+- [x] `POST /shows/:id/holds` (max 6 seats, 600 s TTL, `requireAuth` protected)
+- [x] `DELETE /holds/:holdId` (owner-only; 404 for expired, released, or not yours)
+- [x] Seat status merge (Postgres BOOKED + Redis HELD) in the seat snapshot API; status is never cached
+- [x] Fail closed: Redis down -> 503 on hold endpoints and on the seat map; no fake AVAILABLE
+- [x] Concurrency tests (N parallel -> exactly 1 success) against real Redis
+- [x] ADR 0004 — locking strategy (why Lua, why not Redlock)
+- [x] Tests against real PostgreSQL + Redis
+
+### Phase 3 verification record (2026-10-23)
+
+Windows / Node v22.15.0 / pnpm 10.33.0 / Docker Desktop 29.5.3 (Postgres 55432, Redis 56379).
+
+| # | Check | Command | Result |
+|---|---|---|---|
+| 1 | Tests | `pnpm --filter api test` | **PASS** — 15 files, 86 tests, 0 failures. Run 4× consecutively to check for flakiness. |
+| 2 | Lint | `pnpm lint` | **PASS** — exit 0. |
+| 3 | Typecheck | `pnpm typecheck` | **PASS** — exit 0, all packages. |
+| 4 | Format | `pnpm format:check` | **PASS** — all files match Prettier. |
+| 5 | Build | `pnpm build` | **PASS** — shared + api (`tsc`), web (`next build`). |
+| 6 | Live API | `node dist/index.js` + curl | **PASS** — see below. |
+
+Live end-to-end against the compiled server:
+
+- `POST /shows/:id/holds` → 201 with `{holdId, showId, seatIds, expiresAt, ttlSeconds:600}`;
+  no `userId` anywhere in the response.
+- `GET /shows/:id/seats` → the two held seats report `HELD`, the rest `AVAILABLE`.
+- Anonymous hold → 401. Anonymous release → 401. Release of someone else's hold → 404.
+- Owner release → 204; repeat release → 404.
+- 4th + 4th seat across two separate holds → 201; a 7th seat → 409 `HOLD_LIMIT_EXCEEDED`
+  ("You already hold 6 seat(s) for this show; the limit is 6").
+- Redis inspection: `hold:{showId}:{seatId}` = `{userId}:{holdId}` with TTL 600 (442 remaining
+  mid-test); `hold_meta:{holdId}` present; `user_holds:{userId}:{showId}` is a ZSET whose members
+  are `{holdId}:{seatCount}` and whose scores are expiry epoch milliseconds.
+- Log inspection: no token, password or hash in any log line.
+
+Tests added in Phase 3 (all against real PostgreSQL + real Redis):
+
+- `holds-api.test.ts` (15) — auth required; expiry is server-generated; cookie/key shape and TTL;
+  HELD on the seat map; empty/unknown/duplicate seat rejection; 404 unknown show; 409 conflict;
+  all-or-nothing leaves no partial lock; 6-seat cap across SEPARATE holds; booked seat refused with
+  no Redis lock created; owner-only release; repeat release; allowance restored after release;
+  stale ZSET entries purged; client-supplied `userId` ignored and never echoed.
+- `holds-concurrency.test.ts` (4) — 12 simultaneous users, one seat → exactly 1×201 and 11×409,
+  and Redis holds exactly the winner; 10 users requesting the same 4 seats → 1 winner, no partial
+  hold from the losers; 5 parallel 3-seat requests from ONE user never exceed 6 seats; mixed load
+  then a common seat → exactly 1 winner and the seat map shows exactly 9 HELD.
+- `holds-failure-modes.test.ts` (3) — Redis unreachable → 503 `HOLDS_UNAVAILABLE` on hold and
+  503 `SERVICE_UNAVAILABLE` on the seat map (not a full house of AVAILABLE); BOOKED wins over
+  HELD; a real 5 s TTL expires the lock, frees the seat on the map, makes release a 404, and
+  lets another user take the seat.
+
+#### Bugs and problems found during Phase 3 (all caught by tests or live checks)
+
+| Failure | Cause | Resolution |
+|---|---|---|
+| Seat map returned 500 instead of 503 when Redis was down | `shows-cache` threw raw ioredis errors, so the failure surfaced before the hold-status read was ever reached | `showCache` now converts any Redis failure into `ServiceUnavailableError`; the service degrades a *cache* outage to a Postgres read, while an unknown *hold status* still surfaces as 503 |
+| Hold suite failed intermittently: a winner's seat key was missing | Every suite ran `clearAllHolds` with a global `hold:*` pattern, and Vitest runs test FILES in parallel — so one suite deleted another's live hold | Cleanup is now scoped to `hold:{showId}:*` and each suite owns a private show (`createIsolatedShow`) |
+| `shows-api` / `seed` / `shows-cache` failed depending on run order | Pre-existing fragility: these suites counted EVERY show in the shared test schema, and other suites create their own. `shows-cache` also mutated seeded show #0, whose `show:detail` key `shows-api` deletes between its tests | Suite-created shows are now tagged with `TEST_FIXTURE_SHOW_PREFIX`; the counting tests subtract/exclude them, and `shows-cache` uses its own show |
+| Fixture shows could survive an interrupted run and break the next run | `afterAll` cleanup is skipped when a run is killed | Added a Vitest `globalSetup` that removes leftover fixture shows once, before any test file starts |
+| ESLint: unused `error` binding in the cache guard | `catch (error)` where the value is unused | Changed to a bare `catch` |
+| TypeScript: `zrange(key, 0, -1)` rejected | ioredis 6's `ZRANGE` overloads type `stop` as `string | Buffer` | Tests use `ZRANGEBYSCORE key -inf +inf`, which also returns members in expiry order |
+
+#### Phase 3 interpretation notes
+
+- **`user_holds` is a ZSET, not a set.** A plain set has no per-member TTL, so an
+  abandoned entry would permanently eat a user's 6-seat allowance. The score is the expiry
+  epoch-ms, so one `ZREMRANGEBYSCORE` at the top of every acquire cleans both normal expiry and
+  crash leftovers. Rationale in ADR 0004.
+- **The acquire script's step 3 is a pre-check, not the lock.** It exists to return a precise
+  "which seat is taken" answer; correctness comes from Lua being atomic between the check and
+  the writes, so no read-then-write window exists.
+- **`GET /shows/:id` (`availableSeats`) still counts bookings only**, so it does not immediately
+  drop when seats are held. Correcting it would make a 5-minute cached value depend on Redis and
+  would contradict ADR 0002's cache split. Deliberately deferred and recorded in ADR 0004; the
+  per-seat truth is on `GET /shows/:id/seats`, which is what Phase 7 renders.
+- **`HOLD_TTL_SECONDS` defaults to 600** (the PRD value) and is env-configurable only so
+  integration tests can prove a *real* TTL expiry in seconds. Production must keep 600.
+- **Hold ids are random UUIDs**, so two holds can never collide on `hold_meta:{holdId}`.
+- No new dependencies were added: the holds layer uses the existing `ioredis` (which evaluates
+  Lua through `EVALSHA`/`EVAL`), `zod` and Prisma.
 
 ## Phase 4: Real-Time Sync (WebSockets)
 - [ ] Socket.IO gateway with JWT auth
@@ -322,6 +398,7 @@ Tests added in Phase 2 (against real PostgreSQL in the isolated `seatrush_test` 
 ## Historical Decisions Log (re-validate during the fresh restart)
 | Date | Decision | Why |
 |---|---|---|
+| 2026-10-23 | Seat holds use one Lua script per operation (`ACQUIRE_HOLD_SCRIPT`, `RELEASE_HOLD_SCRIPT`) on a single Redis, not Redlock. `user_holds:{userId}:{showId}` is a ZSET scored by expiry. Fail closed with 503 when Redis is down. See ADR 0004. | Lua gives mutual exclusion with no lease and no clock dependency: one thread runs the script to completion, so no check-then-act window exists. Redlock coordinates several masters, which this single-instance system does not need, and its safety under clock drift is disputed — while a lost Redis is already safe because the Postgres partial unique index is the real guarantee at checkout. The ZSET (instead of a set) is what stops abandoned bookkeeping from permanently consuming a user's 6-seat allowance. |
 | 2026-10-23 | Argon2id (`@node-rs/argon2`, m=19456,t=2,p=1) for password hashing; JWT access + refresh signed with **separate** secrets; refresh token stored only as a SHA-256 hash in a new `sessions` table; single-use rotation with reuse detection that revokes ALL active sessions for the user; HttpOnly/SameSite=Strict/Secure-in-prod cookie scoped to `/auth`; per-route IP rate limiting returning 429 `RATE_LIMITED`; reusable `app.requireAuth` preHandler. See ADR 0003. | Standard, defensible choices for a token-based API: Argon2id is OWASP's first recommendation and ships prebuilt Windows binaries; separate secrets stop a leaked refresh key from minting access tokens; a single-use refresh token makes theft detectable, and revoking every session on reuse contains it; the raw token lives only in the client's cookie. |
 | 2026-10-23 | Prisma **6.19.3** replaces the Phase 0 `pg` pool for all database access. | PRD mandates Prisma; 6.x is the newest stable line that runs on Node 22.15 with `provider = postgresql` + `url`. Prisma 7 needs Node ^22.18 and driver adapters; `latest` is an 8.0 RC. |
 | 2026-10-23 | Partial unique index `booking_seats_active_show_seat_key` created in a hand-written migration, covering `status IN ('PENDING','CONFIRMED')`. | Prisma cannot express a partial index. PENDING must occupy the seat or two concurrent checkouts would both insert and only one would fail after payment. See ADR 0002. |
