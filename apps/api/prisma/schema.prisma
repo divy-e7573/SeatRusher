@@ -54,8 +54,36 @@ model User {
   updatedAt    DateTime @updatedAt @map("updated_at") @db.Timestamptz(3)
 
   bookings Booking[]
+  sessions Session[]
 
   @@map("users")
+}
+
+/// A refresh-token session.
+///
+/// Only the SHA-256 HASH of the refresh token is stored, never the token itself:
+/// if the database leaks, an attacker cannot present the stored value as a valid
+/// credential. Each refresh rotates the token, which revokes the old row and
+/// inserts a new one, so exactly one row per issued token exists.
+///
+/// Reuse detection: presenting an already-revoked token proves either theft or a
+/// replay attack, so the service revokes every active session for that user.
+model Session {
+  id String @id @default(uuid()) @db.Uuid
+  userId String @map("user_id") @db.Uuid
+  /// Hex SHA-256 of the refresh token. Unique so a token maps to exactly one row.
+  refreshTokenHash String @unique @map("refresh_token_hash")
+  expiresAt DateTime @map("expires_at") @db.Timestamptz(3)
+  /// Set when the token is rotated or revoked. NULL means the session is active.
+  revokedAt DateTime? @map("revoked_at") @db.Timestamptz(3)
+  createdAt DateTime @default(now()) @map("created_at") @db.Timestamptz(3)
+  updatedAt DateTime @updatedAt @map("updated_at") @db.Timestamptz(3)
+
+  user User @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  // Supports "revoke every active session for this user" in one indexed scan.
+  @@index([userId, revokedAt])
+  @@map("sessions")
 }
 
 /// A cinema / venue building.
