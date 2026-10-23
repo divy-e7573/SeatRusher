@@ -29,6 +29,17 @@ export function testConfig(overrides: Record<string, string | undefined> = {}): 
   });
 }
 
+/**
+ * Title prefix for shows created BY TESTS, as opposed to shows created by the
+ * seed.
+ *
+ * Vitest runs test files in parallel against one shared `seatrush_test`
+ * schema, so a suite that creates its own rows makes them visible to every
+ * other suite. Tests that assert on the seeded data filter this prefix out
+ * rather than assuming the schema contains nothing but seed rows.
+ */
+export const TEST_FIXTURE_SHOW_PREFIX = 'ZZ Test Fixture: ';
+
 export function testPrisma(config: AppConfig = testConfig()): PrismaClient {
   return new PrismaClient({ datasources: { db: { url: config.databaseUrl } } });
 }

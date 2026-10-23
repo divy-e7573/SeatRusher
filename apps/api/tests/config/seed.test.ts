@@ -4,6 +4,7 @@ import { seedDatabase } from '../../prisma/seed.js';
 import {
   assertInfrastructureReady,
   closeQuietly,
+  TEST_FIXTURE_SHOW_PREFIX,
   testConfig,
   testPrisma,
 } from '../helpers/test-app.js';
@@ -32,8 +33,14 @@ describe('seed script', () => {
     expect(await prisma.venue.count({ where: { id: first.venueId } })).toBe(1);
     expect(await prisma.screen.count()).toBe(1);
     expect(await prisma.seat.count({ where: { screenId } })).toBe(150);
-    expect(await prisma.show.count()).toBe(3);
-    expect(await prisma.showPrice.count()).toBe(6);
+    // Other suites own their own shows in this shared schema and may be
+    // mid-flight here, so count the SEEDED shows rather than every row.
+    const fixtureShows = await prisma.show.count({
+      where: { title: { startsWith: TEST_FIXTURE_SHOW_PREFIX } },
+    });
+    expect((await prisma.show.count()) - fixtureShows).toBe(3);
+    // Same reason for prices: a suite-owned show brings its own price rows.
+    expect(await prisma.showPrice.count({ where: { showId: { in: first.showIds } } })).toBe(6);
   });
 
   it('seeds 15 seats in each of the 10 rows A-J with premium front rows', async () => {

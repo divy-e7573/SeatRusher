@@ -8,5 +8,7 @@ export default defineConfig({
     // so the default 5s timeout is too tight on a cold Docker Desktop.
     testTimeout: 20_000,
     hookTimeout: 20_000,
+    // Clears shows left behind by an interrupted run, once, before any file starts.
+    globalSetup: ['./tests/global-setup.ts'],
   },
 });

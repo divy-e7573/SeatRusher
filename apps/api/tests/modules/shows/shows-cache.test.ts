@@ -13,6 +13,7 @@ import {
   testConfig,
   testPrisma,
 } from '../../helpers/test-app.js';
+import { createIsolatedShow } from '../../helpers/holds.js';
 
 /**
  * Cache-aside behaviour, verified against the real Redis container:
@@ -22,7 +23,7 @@ import {
 describe('shows cache', () => {
   const config = testConfig();
   const logger = createLogger(config);
-  const showId = '22222222-2222-4222-8222-222222222220';
+  let showId: string;
   let prisma: PrismaClient;
   let redis: Redis;
 
@@ -30,9 +31,15 @@ describe('shows cache', () => {
     await assertInfrastructureReady(config);
     prisma = testPrisma(config);
     redis = createRedisClient(config);
+    // This suite mutates a show and asserts on cache keys, so it owns a show.
+    // Sharing a seeded show made it race the shows-api suite: that suite deletes
+    // the same show:detail key between its own tests, which would wipe the
+    // "still cached" value this suite is checking for.
+    ({ showId } = await createIsolatedShow(prisma, 'cache'));
   });
 
   afterAll(async () => {
+    await prisma?.show.deleteMany({ where: { id: showId } });
     await closeQuietly(redis);
     await closeQuietly(prisma);
   });
@@ -41,6 +48,12 @@ describe('shows cache', () => {
     return createShowsService({
       repository: createShowsRepository(prisma),
       cache: createShowCache(redis, logger),
+      // Hold status is Phase 3 behaviour with its own tests. This suite is
+      // about cache keys and TTLs, so the port is stubbed to "nothing held"
+      // to keep seat assertions independent of other suites.
+      holds: {
+        findHeldSeatIds: async () => new Set<string>(),
+      },
     });
   }
 

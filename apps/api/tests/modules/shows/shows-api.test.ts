@@ -8,6 +8,7 @@ import { createRedisClient, ensureRedisConnected } from '../../../src/lib/redis.
 import {
   assertInfrastructureReady,
   closeQuietly,
+  TEST_FIXTURE_SHOW_PREFIX,
   testConfig,
   testPrisma,
 } from '../../helpers/test-app.js';
@@ -50,12 +51,15 @@ describe('shows read APIs', () => {
     expect(response.statusCode).toBe(200);
 
     const body = response.json<{ shows: ShowSummary[] }>();
-    expect(body.shows.length).toBe(3);
-    firstShowId = body.shows[0]?.id ?? '';
+    // Other suites create their own shows in this shared schema; this test is
+    // about the three SEEDED shows, so fixtures are filtered out explicitly.
+    const seeded = body.shows.filter((show) => !show.title.startsWith(TEST_FIXTURE_SHOW_PREFIX));
+    expect(seeded.length).toBe(3);
+    firstShowId = seeded[0]?.id ?? '';
 
-    const startTimes = body.shows.map((show) => new Date(show.startTime).getTime());
+    const startTimes = seeded.map((show) => new Date(show.startTime).getTime());
     expect([...startTimes].sort((a, b) => a - b)).toEqual(startTimes);
-    for (const show of body.shows) {
+    for (const show of seeded) {
       expect(show.totalSeats).toBe(150);
       expect(show.availableSeats).toBe(150);
       expect(show.prices).toEqual(

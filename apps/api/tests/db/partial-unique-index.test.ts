@@ -4,6 +4,7 @@ import { afterAll, beforeAll, describe, expect, it } from 'vitest';
 import {
   assertInfrastructureReady,
   closeQuietly,
+  TEST_FIXTURE_SHOW_PREFIX,
   testConfig,
   testPrisma,
 } from '../helpers/test-app.js';
@@ -35,7 +36,7 @@ describe('partial unique index on booking_seats (show_id, seat_id)', () => {
     await prisma.show.create({
       data: {
         id: SHOW_A,
-        title: 'Constraint Show A',
+        title: `${TEST_FIXTURE_SHOW_PREFIX}Constraint Show A`,
         screenId: screen.id,
         startTime: new Date('2026-01-01T10:00:00Z'),
       },
@@ -43,7 +44,7 @@ describe('partial unique index on booking_seats (show_id, seat_id)', () => {
     await prisma.show.create({
       data: {
         id: SHOW_B,
-        title: 'Constraint Show B',
+        title: `${TEST_FIXTURE_SHOW_PREFIX}Constraint Show B`,
         screenId: screen.id,
         startTime: new Date('2026-01-01T18:00:00Z'),
       },
