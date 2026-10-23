@@ -1,15 +1,19 @@
+import type { PrismaClient } from '@prisma/client';
 import { randomUUID } from 'node:crypto';
 import Fastify from 'fastify';
 import type { Redis } from 'ioredis';
-import type { Pool } from 'pg';
 import type { AppConfig } from './lib/env.js';
 import { registerErrorHandlers } from './lib/error-handler.js';
 import { createLogger, SERVICE_NAME, type SeatrushFastifyInstance } from './lib/logger.js';
 import { healthRoutes } from './modules/health/health-routes.js';
+import { createShowCache } from './modules/shows/shows-cache.js';
+import { createShowsRepository } from './modules/shows/shows-repository.js';
+import { showsRoutes } from './modules/shows/shows-routes.js';
+import { createShowsService } from './modules/shows/shows-service.js';
 
 export interface BuildServerOptions {
   config: AppConfig;
-  postgres: Pool;
+  prisma: PrismaClient;
   redis: Redis;
 }
 
@@ -21,7 +25,7 @@ export interface BuildServerOptions {
  */
 export function buildServer({
   config,
-  postgres,
+  prisma,
   redis,
 }: BuildServerOptions): SeatrushFastifyInstance {
   const startedAt = Date.now();
@@ -45,12 +49,17 @@ export function buildServer({
   registerErrorHandlers(app);
 
   app.register(healthRoutes, {
-    postgres,
+    prisma,
     redis,
     serviceName: SERVICE_NAME,
     probeTimeoutMs: config.healthCheckTimeoutMs,
     startedAt,
   });
+
+  const showsRepository = createShowsRepository(prisma);
+  const showsCache = createShowCache(redis, app.log);
+  const showsService = createShowsService({ repository: showsRepository, cache: showsCache });
+  app.register(showsRoutes, { service: showsService });
 
   return app;
 }

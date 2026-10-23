@@ -1,3 +1,4 @@
+import { Prisma } from '@prisma/client';
 import type { FastifyReply, FastifyRequest } from 'fastify';
 import { ERROR_CODE } from 'shared';
 import { AppError, ValidationError, toErrorResponse } from './errors.js';
@@ -43,6 +44,13 @@ function normaliseError(error: unknown): AppError {
 
   if (isFastifyValidationError(error)) {
     return new ValidationError('Request validation failed');
+  }
+
+  // Prisma surfaces database rule violations as typed errors. P2002 is our
+  // double-booking guard firing: two active rows tried to claim the same seat,
+  // which AGENTS.md defines as HTTP 409.
+  if (error instanceof Prisma.PrismaClientKnownRequestError && error.code === 'P2002') {
+    return new AppError('Seat conflict: the seat is already booked', 'SEAT_CONFLICT', 409);
   }
 
   const statusCode = extractStatusCode(error);

@@ -1,11 +1,11 @@
+import type { PrismaClient } from '@prisma/client';
 import type { Redis } from 'ioredis';
-import type { Pool } from 'pg';
 import { DEPENDENCY_STATUS, HEALTH_STATUS, type HealthResponseBody } from 'shared';
-import { probePostgres } from '../../lib/postgres.js';
+import { probePostgres } from '../../lib/prisma.js';
 import { probeRedis } from '../../lib/redis.js';
 
 export interface HealthDependencies {
-  postgres: Pool;
+  prisma: PrismaClient;
   redis: Redis;
 }
 
@@ -27,7 +27,7 @@ export async function buildHealthReport(
   uptimeSeconds: number,
 ): Promise<HealthResponseBody> {
   const [postgres, redis] = await Promise.all([
-    probePostgres(dependencies.postgres, options.probeTimeoutMs),
+    probePostgres(dependencies.prisma, options.probeTimeoutMs),
     probeRedis(dependencies.redis, options.probeTimeoutMs),
   ]);
 

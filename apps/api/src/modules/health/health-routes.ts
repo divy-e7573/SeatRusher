@@ -1,11 +1,11 @@
+import type { PrismaClient } from '@prisma/client';
 import type { FastifyPluginAsync } from 'fastify';
 import type { Redis } from 'ioredis';
-import type { Pool } from 'pg';
 import { HEALTH_STATUS } from 'shared';
 import { buildHealthReport } from './health-service.js';
 
 export interface HealthRoutesOptions {
-  postgres: Pool;
+  prisma: PrismaClient;
   redis: Redis;
   serviceName: string;
   probeTimeoutMs: number;
@@ -23,7 +23,7 @@ export interface HealthRoutesOptions {
 export const healthRoutes: FastifyPluginAsync<HealthRoutesOptions> = async (fastify, options) => {
   fastify.get('/health', async (_request, reply) => {
     const report = await buildHealthReport(
-      { postgres: options.postgres, redis: options.redis },
+      { prisma: options.prisma, redis: options.redis },
       { serviceName: options.serviceName, probeTimeoutMs: options.probeTimeoutMs },
       Math.round((Date.now() - options.startedAt) / 1000),
     );

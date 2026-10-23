@@ -1,9 +1,10 @@
 import { pino } from 'pino';
 import { buildServer } from './app.js';
 import { ConfigError, loadConfig } from './lib/env.js';
+import { safeErrorMessage } from './lib/errors.js';
 import { createLogger } from './lib/logger.js';
-import { createPostgresPool } from './lib/postgres.js';
-import { createRedisClient } from './lib/redis.js';
+import { getPrisma } from './lib/prisma.js';
+import { createRedisClient, ensureRedisConnected } from './lib/redis.js';
 
 /** Used only before config validation succeeds, so real failures are still structured. */
 const bootstrapLogger = pino({ level: 'error' });
@@ -27,12 +28,24 @@ async function main(): Promise<void> {
   }
 
   const logger = createLogger(config);
-  const postgres = createPostgresPool(config);
+  // Prisma connects lazily, so a database outage cannot stop the API from
+  // booting; /health reports the outage instead.
+  const prisma = getPrisma(config, logger);
   // lazyConnect: constructing the client does not open a socket, so a Redis outage
   // never prevents the API from starting. /health reports the outage instead.
   const redis = createRedisClient(config);
 
-  const app = buildServer({ config, postgres, redis });
+  // Best-effort eager connect so the first request does not pay the connection
+  // cost. A failure here is not fatal: /health will report the outage (invariant 9
+  // means holds are rejected when Redis is down, not that the API refuses to boot).
+  await ensureRedisConnected(redis).catch((error: unknown) => {
+    logger.warn(
+      { err: safeErrorMessage(error) },
+      'Redis is not reachable at startup; /health will report it',
+    );
+  });
+
+  const app = buildServer({ config, prisma, redis });
 
   await app.listen({ host: config.host, port: config.port });
   logger.info(
@@ -59,7 +72,7 @@ async function main(): Promise<void> {
         // Stop accepting requests, then release both clients so no socket is leaked.
         await app.close();
         await redis.quit().catch(() => redis.disconnect());
-        await postgres.end();
+        await prisma.$disconnect();
         logger.info('Shutdown complete');
       } catch (error) {
         logger.error({ err: error }, 'Error during shutdown');
