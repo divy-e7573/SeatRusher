@@ -1,74 +1,39 @@
+import type { PrismaClient } from '@prisma/client';
 import type { Redis } from 'ioredis';
-import { Pool } from 'pg';
 import { afterAll, beforeAll, describe, expect, it } from 'vitest';
 import { buildServer } from '../../../src/app.js';
-import { parseConfig, type AppConfig } from '../../../src/lib/env.js';
 import type { SeatrushFastifyInstance } from '../../../src/lib/logger.js';
-import { probePostgres } from '../../../src/lib/postgres.js';
-import { createRedisClient, probeRedis } from '../../../src/lib/redis.js';
+import { createRedisClient } from '../../../src/lib/redis.js';
+import {
+  assertInfrastructureReady,
+  closeQuietly,
+  testConfig,
+  testPrisma,
+} from '../../helpers/test-app.js';
 
-/**
- * These are integration tests: they talk to a REAL PostgreSQL and Redis, because
- * the thing under test is connectivity itself. Start them with:
- *   docker compose up -d
- *
- * CI provides the same services as service containers (see .github/workflows/ci.yml).
- */
-
-const DEFAULT_DATABASE_URL = 'postgres://seatrush:seatrush_dev_password@localhost:5432/seatrush';
-const DEFAULT_REDIS_URL = 'redis://localhost:6379';
-// Port 1 is never served locally, so this URL fails fast and deterministically.
+// Port 1 is never served locally, so these URLs fail fast and deterministically.
 const UNREACHABLE_REDIS_URL = 'redis://127.0.0.1:1';
-
-function testConfig(overrides: Record<string, string | undefined> = {}): AppConfig {
-  return parseConfig({
-    NODE_ENV: 'test',
-    LOG_LEVEL: 'silent',
-    DATABASE_URL: process.env['TEST_DATABASE_URL'] ?? DEFAULT_DATABASE_URL,
-    REDIS_URL: process.env['TEST_REDIS_URL'] ?? DEFAULT_REDIS_URL,
-    ...overrides,
-  });
-}
+const UNREACHABLE_DATABASE_URL =
+  'postgres://seatrush:seatrush_dev_password@127.0.0.1:1/seatrush?connect_timeout=1';
 
 describe('GET /health against real infrastructure', () => {
   const config = testConfig();
   let app: SeatrushFastifyInstance;
-  let postgres: Pool;
+  let prisma: PrismaClient;
   let redis: Redis;
 
   beforeAll(async () => {
-    // Fail loudly and actionably if the developer forgot to start Docker.
-    const preflightPool = new Pool({
-      connectionString: config.databaseUrl,
-      connectionTimeoutMillis: 3000,
-    });
-    const postgresProbe = await probePostgres(preflightPool, 3000);
-    await preflightPool.end();
-    if (postgresProbe.status === 'down') {
-      throw new Error(
-        `Postgres is not reachable (${postgresProbe.error ?? 'unknown error'}). Run: docker compose up -d`,
-      );
-    }
-
-    const preflightRedis = createRedisClient(config);
-    const redisProbe = await probeRedis(preflightRedis, 3000);
-    await preflightRedis.quit().catch(() => preflightRedis.disconnect());
-    if (redisProbe.status === 'down') {
-      throw new Error(
-        `Redis is not reachable (${redisProbe.error ?? 'unknown error'}). Run: docker compose up -d`,
-      );
-    }
-
-    postgres = new Pool({ connectionString: config.databaseUrl, connectionTimeoutMillis: 3000 });
+    await assertInfrastructureReady(config);
+    prisma = testPrisma(config);
     redis = createRedisClient(config);
-    app = buildServer({ config, postgres, redis });
+    app = buildServer({ config, prisma, redis });
     await app.ready();
   });
 
   afterAll(async () => {
     await app?.close();
-    await redis?.quit().catch(() => redis?.disconnect());
-    await postgres?.end();
+    await closeQuietly(redis);
+    await closeQuietly(prisma);
   });
 
   it('reports 200 and status=ok when Postgres and Redis both answer', async () => {
@@ -96,7 +61,6 @@ describe('GET /health against real infrastructure', () => {
     expect(body.checks.postgres.latencyMs).toBeGreaterThanOrEqual(0);
     expect(body.checks.redis.latencyMs).toBeGreaterThanOrEqual(0);
     expect(typeof body.uptimeSeconds).toBe('number');
-    // Server-generated timestamp: it must parse as a recent ISO-8601 instant.
     expect(Number.isNaN(Date.parse(body.timestamp))).toBe(false);
   });
 
@@ -124,12 +88,9 @@ describe('GET /health when a dependency is down', () => {
   it('returns 503 with status=degraded and reports which check failed', async () => {
     // Real Postgres, deliberately broken Redis: proves a single failure is isolated.
     const config = testConfig({ REDIS_URL: UNREACHABLE_REDIS_URL });
-    const postgres = new Pool({
-      connectionString: config.databaseUrl,
-      connectionTimeoutMillis: 3000,
-    });
+    const prisma = testPrisma(config);
     const redis = createRedisClient(config);
-    const app = buildServer({ config, postgres, redis });
+    const app = buildServer({ config, prisma, redis });
 
     try {
       const response = await app.inject({ method: 'GET', url: '/health' });
@@ -143,29 +104,23 @@ describe('GET /health when a dependency is down', () => {
       expect(body.status).toBe('degraded');
       expect(body.checks.postgres.status).toBe('up');
       expect(body.checks.redis.status).toBe('down');
-      // The failure reason is present but must never leak the connection string.
       expect(body.checks.redis.error).toBeTruthy();
       expect(JSON.stringify(body)).not.toContain('@');
     } finally {
       await app.close();
-      await redis.quit().catch(() => redis.disconnect());
-      await postgres.end();
+      await closeQuietly(redis);
+      await closeQuietly(prisma);
     }
   });
 
   it('returns 503 with both checks down when nothing is reachable', async () => {
-    // Deliberately uses no infrastructure at all, so this case runs anywhere.
     const config = testConfig({
       REDIS_URL: UNREACHABLE_REDIS_URL,
-      DATABASE_URL: 'postgres://seatrush:seatrush_dev_password@127.0.0.1:1/seatrush',
-      HEALTH_CHECK_TIMEOUT_MS: '1000',
+      DATABASE_URL: UNREACHABLE_DATABASE_URL,
     });
-    const postgres = new Pool({
-      connectionString: config.databaseUrl,
-      connectionTimeoutMillis: 1000,
-    });
+    const prisma = testPrisma(config);
     const redis = createRedisClient(config);
-    const app = buildServer({ config, postgres, redis });
+    const app = buildServer({ config, prisma, redis });
 
     try {
       const response = await app.inject({ method: 'GET', url: '/health' });
@@ -182,12 +137,11 @@ describe('GET /health when a dependency is down', () => {
       expect(body.status).toBe('degraded');
       expect(body.checks.postgres.status).toBe('down');
       expect(body.checks.redis.status).toBe('down');
-      // Password must not survive redaction inside the response payload.
       expect(JSON.stringify(body)).not.toContain('seatrush_dev_password');
     } finally {
       await app.close();
-      await redis.quit().catch(() => redis.disconnect());
-      await postgres.end();
+      await closeQuietly(redis);
+      await closeQuietly(prisma);
     }
   });
 });

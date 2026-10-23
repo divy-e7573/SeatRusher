@@ -1,0 +1,74 @@
+/**
+ * Shared helpers for integration tests.
+ *
+ * Every integration test in this package talks to the REAL Postgres (isolated
+ * seatrush_test schema) and the REAL Redis container, per AGENTS.md: mocks would
+ * not exercise the constraints this phase is about.
+ */
+
+import { PrismaClient } from '@prisma/client';
+import type { Redis } from 'ioredis';
+import { parseConfig, type AppConfig } from '../../src/lib/env.js';
+import { createRedisClient, probeRedis } from '../../src/lib/redis.js';
+import { probePostgres } from '../../src/lib/prisma.js';
+import { resolveTestDatabaseUrl } from '../../prisma/test-database.js';
+
+export function testConfig(overrides: Record<string, string | undefined> = {}): AppConfig {
+  return parseConfig({
+    NODE_ENV: 'test',
+    LOG_LEVEL: 'silent',
+    DATABASE_URL: resolveTestDatabaseUrl(process.env),
+    REDIS_URL:
+      process.env['TEST_REDIS_URL'] ?? process.env['REDIS_URL'] ?? 'redis://localhost:6379',
+    ...overrides,
+  });
+}
+
+export function testPrisma(config: AppConfig = testConfig()): PrismaClient {
+  return new PrismaClient({ datasources: { db: { url: config.databaseUrl } } });
+}
+
+/**
+ * Fails loudly and actionably when the developer forgot to start Docker or to
+ * prepare the test database (`pnpm --filter api db:test:prepare`).
+ */
+export async function assertInfrastructureReady(config: AppConfig = testConfig()): Promise<void> {
+  const prisma = testPrisma(config);
+  const redis = createRedisClient(config);
+  try {
+    const postgresProbe = await probePostgres(prisma, 4000);
+    if (postgresProbe.status === 'down') {
+      throw new Error(
+        `Postgres is not reachable (${postgresProbe.error ?? 'unknown error'}). ` +
+          'Start it with: docker compose up -d --wait, then run: pnpm --filter api db:test:prepare',
+      );
+    }
+    const redisProbe = await probeRedis(redis, 4000);
+    if (redisProbe.status === 'down') {
+      throw new Error(
+        `Redis is not reachable (${redisProbe.error ?? 'unknown error'}). ` +
+          'Start it with: docker compose up -d --wait (or set TEST_REDIS_URL).',
+      );
+    }
+    // A reachable but unmigrated database would otherwise fail every query with a
+    // confusing missing-table error.
+    const showCount = await prisma.show.count();
+    if (showCount === 0) {
+      throw new Error(
+        'The test database has no data. Run: pnpm --filter api db:test:prepare ' +
+          '(migrates + seeds the seatrush_test schema).',
+      );
+    }
+  } finally {
+    await redis.quit().catch(() => redis.disconnect());
+    await prisma.$disconnect();
+  }
+}
+
+export async function closeQuietly(client: Redis | PrismaClient): Promise<void> {
+  if ('quit' in client) {
+    await (client as Redis).quit().catch(() => (client as Redis).disconnect());
+  } else {
+    await (client as PrismaClient).$disconnect();
+  }
+}
