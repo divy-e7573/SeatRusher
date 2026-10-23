@@ -25,6 +25,20 @@ export class NotFoundError extends AppError {
   }
 }
 
+/**
+ * A required backing service could not be reached. Maps to HTTP 503.
+ *
+ * Used by the seat-hold path for Redis (invariant 9: fail closed) and by the
+ * seat-map endpoint, which must never report every seat as AVAILABLE just
+ * because Redis could not be asked whether seats are held.
+ */
+export class ServiceUnavailableError extends AppError {
+  constructor(message: string) {
+    super(message, 'SERVICE_UNAVAILABLE', 503);
+    this.name = 'ServiceUnavailableError';
+  }
+}
+
 /** Client input failed validation. Maps to HTTP 400. */
 export class ValidationError extends AppError {
   constructor(message: string) {

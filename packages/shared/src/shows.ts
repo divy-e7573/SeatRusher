@@ -13,9 +13,17 @@ export const SEAT_CATEGORY = {
 
 export type SeatCategory = (typeof SEAT_CATEGORY)[keyof typeof SEAT_CATEGORY];
 
-/** Effective state of a seat for one show. HELD arrives with Redis holds in Phase 3. */
+/**
+ * Effective state of a seat for one show.
+ *
+ * The three values are ordered by authority, and that order is applied when a
+ * seat is both booked and held: a seat in Postgres wins, because Postgres is
+ * the final source of truth (AGENTS.md invariant 1).
+ */
 export const SEAT_STATUS = {
   AVAILABLE: 'AVAILABLE',
+  /** Locked by a live Redis hold (Phase 3). Not durable; disappears on expiry. */
+  HELD: 'HELD',
   BOOKED: 'BOOKED',
 } as const;
 

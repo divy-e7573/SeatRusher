@@ -3,3 +3,4 @@ export * from './errors.js';
 export * from './bookings.js';
 export * from './shows.js';
 export * from './auth.js';
+export * from './holds.js';

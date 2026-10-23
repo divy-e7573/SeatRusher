@@ -117,6 +117,30 @@ const rawEnvSchema = z.object({
     .int('must be an integer')
     .min(1000, 'must be >= 1000')
     .default(60_000),
+
+  // --- Seat holds (Phase 3) ----------------------------------------------
+  // PRD FR-3 fixes the hold window at 10 minutes. The variable exists so the
+  // value is explicit in one place and so integration tests can exercise real
+  // TTL expiry in seconds rather than waiting 10 minutes; production must keep
+  // it at 600 (see ADR 0004).
+  HOLD_TTL_SECONDS: z.coerce
+    .number()
+    .int('must be an integer')
+    .min(5, 'must be >= 5')
+    .max(3600, 'must be <= 3600')
+    .default(600),
+  // FR-8: rate limiting on the hold endpoints, keyed per authenticated user.
+  HOLD_RATE_LIMIT_MAX: z.coerce
+    .number()
+    .int('must be an integer')
+    .min(1, 'must be >= 1')
+    .max(10_000)
+    .default(30),
+  HOLD_RATE_LIMIT_WINDOW_MS: z.coerce
+    .number()
+    .int('must be an integer')
+    .min(1000, 'must be >= 1000')
+    .default(60_000),
 });
 
 const envSchema = rawEnvSchema.transform((env) => ({
@@ -141,6 +165,13 @@ const envSchema = rawEnvSchema.transform((env) => ({
   authRateLimit: {
     max: env.AUTH_RATE_LIMIT_MAX,
     windowMs: env.AUTH_RATE_LIMIT_WINDOW_MS,
+  },
+  hold: {
+    ttlSeconds: env.HOLD_TTL_SECONDS,
+    rateLimit: {
+      max: env.HOLD_RATE_LIMIT_MAX,
+      windowMs: env.HOLD_RATE_LIMIT_WINDOW_MS,
+    },
   },
 }));
 

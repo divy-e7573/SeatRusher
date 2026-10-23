@@ -13,11 +13,16 @@ import { createRequireAuth } from './modules/auth/auth-middleware.js';
 import { authRoutes } from './modules/auth/auth-routes.js';
 import { createAuthService } from './modules/auth/auth-service.js';
 import { createTokenIssuer } from './modules/auth/tokens.js';
+import { createHoldPreconditionsRepository } from './modules/holds/hold-preconditions-repository.js';
+import { createHoldsRepository } from './modules/holds/holds-repository.js';
+import { holdsRoutes } from './modules/holds/holds-routes.js';
+import { createHoldsService } from './modules/holds/holds-service.js';
 import { healthRoutes } from './modules/health/health-routes.js';
 import { createShowCache } from './modules/shows/shows-cache.js';
 import { createShowsRepository } from './modules/shows/shows-repository.js';
 import { showsRoutes } from './modules/shows/shows-routes.js';
 import { createShowsService } from './modules/shows/shows-service.js';
+import { MAX_SEATS_PER_HOLD } from 'shared';
 
 export interface BuildServerOptions {
   config: AppConfig;
@@ -70,6 +75,17 @@ export function buildServer({
 
   registerErrorHandlers(app);
 
+  const tokens = createTokenIssuer(config.jwt);
+  const authService = createAuthService({
+    repository: createAuthRepository(prisma),
+    tokens,
+    logger: app.log,
+  });
+
+  // Decorated BEFORE any route that uses it: a Fastify decoration must exist
+  // by the time a route referencing it is registered.
+  app.decorate('requireAuth', createRequireAuth(tokens, authService));
+
   app.register(healthRoutes, {
     prisma,
     redis,
@@ -78,21 +94,31 @@ export function buildServer({
     startedAt,
   });
 
+  // One hold store feeds both the write path (holds routes) and the read path
+  // (seat map), so a hold is visible to the very next seat-map request.
+  const holdsRepository = createHoldsRepository(redis);
+
   const showsRepository = createShowsRepository(prisma);
   const showsCache = createShowCache(redis, app.log);
-  const showsService = createShowsService({ repository: showsRepository, cache: showsCache });
+  const showsService = createShowsService({
+    repository: showsRepository,
+    cache: showsCache,
+    holds: holdsRepository,
+  });
   app.register(showsRoutes, { service: showsService });
 
-  const tokens = createTokenIssuer(config.jwt);
-  const authService = createAuthService({
-    repository: createAuthRepository(prisma),
-    tokens,
-    logger: app.log,
-  });
   app.register(authRoutes, { service: authService, config });
 
-  // Exposed so Phase 3+ adds `preHandler: app.requireAuth` instead of rebuilding it.
-  app.decorate('requireAuth', createRequireAuth(tokens, authService));
+  app.register(holdsRoutes, {
+    service: createHoldsService({
+      holds: holdsRepository,
+      preconditions: createHoldPreconditionsRepository(prisma),
+      ttlSeconds: config.hold.ttlSeconds,
+      maxSeats: MAX_SEATS_PER_HOLD,
+      logger: app.log,
+    }),
+    rateLimit: config.hold.rateLimit,
+  });
 
   return app;
 }

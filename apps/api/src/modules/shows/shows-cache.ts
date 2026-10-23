@@ -2,6 +2,7 @@ import type { Redis } from 'ioredis';
 import type { Logger } from 'pino';
 import { z } from 'zod';
 import { seatLayoutKey, showDetailKey, SHOW_DETAIL_TTL_SECONDS } from '../../lib/redis-keys.js';
+import { ServiceUnavailableError } from '../../lib/errors.js';
 import { ensureRedisConnected } from '../../lib/redis.js';
 import type { ShowDetail } from 'shared';
 
@@ -62,9 +63,26 @@ export interface ShowCache {
 }
 
 export function createShowCache(redis: Redis, logger: Logger): ShowCache {
+  /**
+   * Runs a cache command, converting ANY Redis failure into a TYPED error.
+   *
+   * Both halves matter: the connect can fail, and so can the command itself
+   * (the socket can drop between connect and GET). The service needs to tell
+   * "the cache is unavailable" apart from "the live seat status is
+   * unavailable": the first degrades to a Postgres read, the second must
+   * surface as a 503 so nobody mistakes it for a free seat.
+   */
+  async function guard<T>(operation: () => Promise<T>): Promise<T> {
+    try {
+      await ensureRedisConnected(redis);
+      return await operation();
+    } catch {
+      throw new ServiceUnavailableError('Show cache is temporarily unavailable');
+    }
+  }
+
   async function readJson(key: string): Promise<string | null> {
-    await ensureRedisConnected(redis);
-    return redis.get(key);
+    return guard(() => redis.get(key));
   }
 
   return {
@@ -84,12 +102,8 @@ export function createShowCache(redis: Redis, logger: Logger): ShowCache {
     },
 
     async setShowDetail(detail: ShowDetail): Promise<void> {
-      await ensureRedisConnected(redis);
-      await redis.set(
-        showDetailKey(detail.id),
-        JSON.stringify(detail),
-        'EX',
-        SHOW_DETAIL_TTL_SECONDS,
+      await guard(() =>
+        redis.set(showDetailKey(detail.id), JSON.stringify(detail), 'EX', SHOW_DETAIL_TTL_SECONDS),
       );
     },
 
@@ -107,41 +121,40 @@ export function createShowCache(redis: Redis, logger: Logger): ShowCache {
     },
 
     async setSeatLayout(showId: string, layout: CachedSeatLayout): Promise<void> {
-      await ensureRedisConnected(redis);
       // No EX argument on purpose: the layout is immutable, so it never expires.
-      await redis.set(seatLayoutKey(showId), JSON.stringify(layout));
+      await guard(() => redis.set(seatLayoutKey(showId), JSON.stringify(layout)));
     },
 
     async invalidateShow(showId: string): Promise<void> {
-      await ensureRedisConnected(redis);
-      await redis.del(showDetailKey(showId), seatLayoutKey(showId));
+      await guard(() => redis.del(showDetailKey(showId), seatLayoutKey(showId)));
     },
 
     async clearAllShowCaches(): Promise<number> {
-      await ensureRedisConnected(redis);
-      // SCAN rather than KEYS: KEYS blocks the Redis event loop for the whole
-      // keyspace, which would be self-defeating in the system's most latency
-      // sensitive datastore.
-      let cursor = '0';
-      let removed = 0;
-      do {
-        const [next, keys] = await redis.scan(cursor, 'MATCH', 'show:detail:*', 'COUNT', 100);
-        cursor = next;
-        if (keys.length > 0) {
-          removed += await redis.del(...keys);
-        }
-      } while (cursor !== '0');
+      return guard(async () => {
+        // SCAN rather than KEYS: KEYS blocks the Redis event loop for the whole
+        // keyspace, which would be self-defeating in the system's most latency
+        // sensitive datastore.
+        let cursor = '0';
+        let removed = 0;
+        do {
+          const [next, keys] = await redis.scan(cursor, 'MATCH', 'show:detail:*', 'COUNT', 100);
+          cursor = next;
+          if (keys.length > 0) {
+            removed += await redis.del(...keys);
+          }
+        } while (cursor !== '0');
 
-      cursor = '0';
-      do {
-        const [next, keys] = await redis.scan(cursor, 'MATCH', 'seat:layout:*', 'COUNT', 100);
-        cursor = next;
-        if (keys.length > 0) {
-          removed += await redis.del(...keys);
-        }
-      } while (cursor !== '0');
+        cursor = '0';
+        do {
+          const [next, keys] = await redis.scan(cursor, 'MATCH', 'seat:layout:*', 'COUNT', 100);
+          cursor = next;
+          if (keys.length > 0) {
+            removed += await redis.del(...keys);
+          }
+        } while (cursor !== '0');
 
-      return removed;
+        return removed;
+      });
     },
   };
 }

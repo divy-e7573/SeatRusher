@@ -27,3 +27,45 @@ export function seatLayoutKeyPattern(): string {
 
 /** TTL for show detail: short enough that availability drift self-heals. */
 export const SHOW_DETAIL_TTL_SECONDS = 300;
+
+// --- Seat holds (Phase 3) -------------------------------------------------
+// The three key names below are fixed by AGENTS.md, so every contributor (and
+// every future socket worker) derives them from here rather than concatenating
+// strings inline.
+
+/**
+ * One seat lock: hold:{showId}:{seatId}.
+ *
+ * Value is {userId}:{holdId}. The user id prefix makes an owner-only release a
+ * compare-and-delete; the hold id says which of that user's own holds owns it.
+ */
+export function seatHoldKey(showId: string, seatId: string): string {
+  return `hold:${showId}:${seatId}`;
+}
+
+/** Metadata of one hold: hold_meta:{holdId}. Holds the seat list and expiry. */
+export function holdMetaKey(holdId: string): string {
+  return `hold_meta:${holdId}`;
+}
+
+/**
+ * Every live hold of one user for one show: user_holds:{userId}:{showId}.
+ *
+ * A ZSET, not a set: the score is the expiry timestamp in epoch milliseconds,
+ * so one ZREMRANGEBYSCORE deletes every expired entry. That is what stops
+ * abandoned metadata from permanently consuming a user's 6-seat allowance
+ * (a plain SET has no per-member TTL and would leak).
+ */
+export function userHoldsKey(userId: string, showId: string): string {
+  return `user_holds:${userId}:${showId}`;
+}
+
+/** Member format of the ZSET: holdId and seat count joined by a colon. */
+export function userHoldMember(holdId: string, seatCount: number): string {
+  return `${holdId}:${seatCount}`;
+}
+
+/** Matches every seat lock of one show; used by tests and the Phase 5 sweeper. */
+export function seatHoldKeyPattern(showId: string): string {
+  return `hold:${showId}:*`;
+}
