@@ -17,6 +17,11 @@ export function testConfig(overrides: Record<string, string | undefined> = {}): 
   return parseConfig({
     NODE_ENV: 'test',
     LOG_LEVEL: 'silent',
+    // Deterministic test secrets. Still 32+ chars so the production-strength
+    // validator is genuinely exercised, but committed on purpose: a test secret is
+    // not a secret, and the tests must be able to forge/expire tokens.
+    JWT_ACCESS_SECRET: 'test-access-secret-not-a-real-value-000000000000',
+    JWT_REFRESH_SECRET: 'test-refresh-secret-not-a-real-value-0000000000',
     DATABASE_URL: resolveTestDatabaseUrl(process.env),
     REDIS_URL:
       process.env['TEST_REDIS_URL'] ?? process.env['REDIS_URL'] ?? 'redis://localhost:6379',
