@@ -1,4 +1,4 @@
-import { ERROR_CODE, type ErrorResponseBody } from 'shared';
+import { ERROR_CODE, ERROR_CODE_AUTH, type ErrorResponseBody } from 'shared';
 
 /**
  * Base class for every error the API deliberately surfaces to clients.
@@ -30,6 +30,21 @@ export class ValidationError extends AppError {
   constructor(message: string) {
     super(message, ERROR_CODE.BAD_REQUEST, 400);
     this.name = 'ValidationError';
+  }
+}
+
+/**
+ * Too many requests from one client. Maps to HTTP 429.
+ *
+ * `@fastify/rate-limit` throws whatever its `errorResponseBuilder` returns. A
+ * plain object there would make Fastify unable to read a `statusCode`, so the
+ * rejection would surface as an unexpected 500. Returning this class keeps it
+ * on the normal AppError path: HTTP 429 with the standard error envelope.
+ */
+export class RateLimitError extends AppError {
+  constructor(after: string) {
+    super(`Too many requests. Try again in ${after}.`, ERROR_CODE_AUTH.RATE_LIMITED, 429);
+    this.name = 'RateLimitError';
   }
 }
 

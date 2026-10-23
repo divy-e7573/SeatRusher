@@ -3,7 +3,7 @@
 Live progress tracker for SeatRush. Update this file after each task and at the end of every phase.
 
 **Working mode:** Fresh restart from Phase 0. Implement and learn one phase at a time, using Codex for implementation and ChatGPT for review/explanation.
-**Current phase:** Phase 1 — Database & Read APIs (implemented and locally verified; awaiting user review)
+**Current phase:** Phase 2 — Authentication (implemented and locally verified; awaiting user review)
 **Last updated:** 2026-10-23
 **Status legend:** `[ ]` not started, `[~]` in progress, `[x]` implemented and verified
 
@@ -163,11 +163,89 @@ Tests added in Phase 1 (all against real Postgres + Redis):
 - `GET /shows` is not cached (Phase 1 keeps it simple); caching the list is an easy Phase 6+ win.
 
 ## Phase 2: Authentication
-- [ ] Register / login / refresh
-- [ ] Password hashing
-- [ ] Auth middleware (JWT)
-- [ ] Rate limit on auth routes
-- [ ] Tests
+- [x] `POST /auth/register`, `POST /auth/login`, `POST /auth/refresh` (+ `POST /auth/logout` clears the cookie)
+- [x] Password hashing with Argon2id (`@node-rs/argon2`, OWASP params); no plaintext or hash ever in a response or log
+- [x] Short-lived JWT access token + long-lived refresh token, signed with **separate** secrets; refresh token stored only as a SHA-256 hash in a new `sessions` table (migration `20261023065913_sessions`)
+- [x] Refresh-token rotation with reuse detection: replaying a revoked token revokes **all** active sessions for that user
+- [x] HttpOnly refresh cookie (`SameSite=Strict`, `Secure` derived from `NODE_ENV`, `Path=/auth`)
+- [x] Reusable `app.requireAuth` JWT middleware (preHandler) for Phase 3+ protected routes
+- [x] Zod validation via shared schemas in `packages/shared`; duplicate email → Prisma `P2002` → HTTP 409 `EMAIL_ALREADY_EXISTS`
+- [x] Per-route IP rate limiting (`@fastify/rate-limit`) returning HTTP 429 `RATE_LIMITED`
+- [x] Tests against real PostgreSQL (64 tests, 12 files, all passing)
+- [x] ADR 0003 — authentication decisions
+
+### Phase 2 verification record (2026-10-23)
+
+All commands below were actually executed on Windows / Node v22.15.0 / pnpm 10.33.0 /
+Docker Desktop 29.5.3 (Postgres on 55432, Redis on 56379).
+
+| # | Check | Command | Result |
+|---|---|---|---|
+| 1 | Email constraint verified | inspected `schema.prisma` + `init` migration + live `pg_indexes` | **PASS** — `users.email String @unique`, plain index `users_email_key` (NOT partial). |
+| 2 | Dependencies installed | `pnpm add @node-rs/argon2 jose @fastify/cookie @fastify/rate-limit` (+ `zod` in shared) | **PASS** — argon2id hash/verify verified working on prebuilt Windows binaries. |
+| 3 | Migration applied | `prisma migrate` (dev + `seatrush_test` via `db:test:prepare`) | **PASS** — `sessions` table, unique `refresh_token_hash`, FK cascade. |
+| 4 | Tests | `pnpm --filter api test` | **PASS** — 12 files, 64 tests, 0 failures. |
+| 5 | Lint | `pnpm lint` | **PASS** — exit 0. |
+| 6 | Typecheck | `pnpm typecheck` | **PASS** — exit 0, all packages. |
+| 7 | Format | `pnpm format:check` | **PASS** — all files match Prettier. |
+| 8 | Build | `pnpm build` | **PASS** — shared + api (`tsc`), web (`next build`). |
+| 9 | Live API | `node dist/index.js` + curl | **PASS** — see below. |
+
+Live end-to-end against the compiled server (curl, real Postgres/Redis):
+
+- `GET /health` → 200, postgres + redis up.
+- `POST /auth/register` → 201; `Set-Cookie: seatrush_refresh=...; Max-Age=604800; Path=/auth; HttpOnly; SameSite=Strict`.
+  Body contains `user` + `accessToken` only — no `passwordHash`, no refresh token.
+- Duplicate register → 409 `{"error":{"code":"EMAIL_ALREADY_EXISTS",...}}`.
+- Login with wrong password / unknown email → identical 401 `INVALID_CREDENTIALS`.
+- Invalid body → 400 `BAD_REQUEST`.
+- `POST /auth/refresh` → 200 with a **new** cookie; the old session row is revoked.
+- Replaying the old (revoked) token → 401 `"Refresh token reuse detected; all sessions have
+  been revoked"`, and the *new* token is then dead too (all active sessions revoked).
+- `POST /auth/logout` → 204 with `Max-Age=0` clear-cookie.
+- Database inspection: `password_hash` starts with `$argon2id$v=19$m=19456,t=2,p=1`;
+  all `refresh_token_hash` values match `^[0-9a-f]{64}$` (SHA-256), none is a JWT.
+- Log inspection: no JWT, password, or hash appears in any log line; auth logs record only
+  email / userId / event.
+
+Tests added in Phase 2 (against real PostgreSQL in the isolated `seatrush_test` schema):
+
+- `auth-api.test.ts` — register 201 + cookie flags, no hash in response, Argon2id stored,
+  email lowercased, duplicate 409, invalid bodies 400, login success, wrong password 401,
+  unknown email identical to wrong password, refresh token stored only as a SHA-256 hash.
+- `refresh-rotation.test.ts` — rotation (new token, old row revoked), old token rejected
+  after rotation, reuse revokes ALL active sessions, expired token 401, tampered token 401,
+  no cookie 401, logout clears cookie, access token cannot be used as a refresh token.
+- `auth-middleware.test.ts` — valid bearer passes; missing/malformed header 401; token
+  forged with an attacker secret 401; expired access token 401.
+- `rate-limit.test.ts` — after `max` attempts the endpoint returns 429 with the standard
+  `RATE_LIMITED` envelope and a `requestId`.
+
+#### Bugs found and fixed during Phase 2 (caught by tests)
+
+| Failure | Cause | Resolution |
+|---|---|---|
+| Register-then-login within the same second failed with a session-insert 409 | Two JWTs minted in the same second for the same user were **byte-identical** (same `sub`/`iat`/`issuer`), so their SHA-256 hashes collided on the unique `refresh_token_hash` index | Added a random `jti` (`randomUUID()`) to every issued token. Verified: register 201 then login 200 with distinct tokens. |
+| Rate-limit test got HTTP 500 instead of 429 | `@fastify/rate-limit` **throws** whatever `errorResponseBuilder` returns; a plain object has no `statusCode`, so Fastify's error path treated it as an unexpected 500 | `errorResponseBuilder` now returns a `RateLimitError` (an `AppError` with status 429), which flows through the normal envelope. Test now asserts 429 + `RATE_LIMITED`. |
+| ESLint: unused `name` arg in `secret()` helper; `z` imported as a value but used only as a type | Leftovers from an earlier revision | Removed the unused parameter; switched to `import type { z }`. |
+
+#### Phase 2 interpretation notes
+
+- **`users.email` is a plain unique index**, verified in the schema, the init migration and
+  the live database. Prisma `P2002` on `users` can therefore only mean a duplicate email and
+  is mapped to 409 `EMAIL_ALREADY_EXISTS` (Phase 1's `P2002` mapping still reserves
+  `booking_seats` for `SEAT_CONFLICT`).
+- **Logout is cookie-only** (no server-side session revoke). The Phase 2 brief did not list
+  logout as a task and the PRD has no logout requirement; reuse detection already contains a
+  stolen token. Recorded here so it is a conscious choice, not an oversight.
+- **Argon2id over bcrypt** (the brief allowed either): Argon2id is the current OWASP first
+  choice and `@node-rs/argon2` ships prebuilt Windows binaries, so no native build toolchain
+  is required.
+- **The refresh token never appears in a JSON body**, only in the HttpOnly cookie; the
+  access token is the only token in the body. The `AuthResponse` type enforces this.
+- **No new dependencies beyond auth necessity**: `@node-rs/argon2`, `jose`,
+  `@fastify/cookie`, `@fastify/rate-limit` (API) and `zod` (shared). No Supertest, no
+  cookie-parser (the Fastify plugin covers it), no frontend auth.
 
 ## Phase 3: Redis Seat Hold (Core)
 - [ ] Redis key design + constants
@@ -244,6 +322,7 @@ Tests added in Phase 1 (all against real Postgres + Redis):
 ## Historical Decisions Log (re-validate during the fresh restart)
 | Date | Decision | Why |
 |---|---|---|
+| 2026-10-23 | Argon2id (`@node-rs/argon2`, m=19456,t=2,p=1) for password hashing; JWT access + refresh signed with **separate** secrets; refresh token stored only as a SHA-256 hash in a new `sessions` table; single-use rotation with reuse detection that revokes ALL active sessions for the user; HttpOnly/SameSite=Strict/Secure-in-prod cookie scoped to `/auth`; per-route IP rate limiting returning 429 `RATE_LIMITED`; reusable `app.requireAuth` preHandler. See ADR 0003. | Standard, defensible choices for a token-based API: Argon2id is OWASP's first recommendation and ships prebuilt Windows binaries; separate secrets stop a leaked refresh key from minting access tokens; a single-use refresh token makes theft detectable, and revoking every session on reuse contains it; the raw token lives only in the client's cookie. |
 | 2026-10-23 | Prisma **6.19.3** replaces the Phase 0 `pg` pool for all database access. | PRD mandates Prisma; 6.x is the newest stable line that runs on Node 22.15 with `provider = postgresql` + `url`. Prisma 7 needs Node ^22.18 and driver adapters; `latest` is an 8.0 RC. |
 | 2026-10-23 | Partial unique index `booking_seats_active_show_seat_key` created in a hand-written migration, covering `status IN ('PENDING','CONFIRMED')`. | Prisma cannot express a partial index. PENDING must occupy the seat or two concurrent checkouts would both insert and only one would fail after payment. See ADR 0002. |
 | 2026-10-23 | Money stored as integer **paise** (`amount_paise`, `price_paise`, `total_amount_paise`). | Float money accumulates rounding errors; integer paise serialize cleanly to JSON. |

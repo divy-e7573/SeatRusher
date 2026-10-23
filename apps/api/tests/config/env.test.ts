@@ -8,6 +8,10 @@ function validEnv(
   return {
     DATABASE_URL: 'postgres://seatrush:secret@localhost:5432/seatrush',
     REDIS_URL: 'redis://localhost:6379',
+    // Auth secrets are REQUIRED in every environment, including tests: silently
+    // defaulting them would let a real deployment run with a known signing key.
+    JWT_ACCESS_SECRET: 'test-access-secret-not-a-real-value-000000000000',
+    JWT_REFRESH_SECRET: 'test-refresh-secret-not-a-real-value-0000000000',
     ...overrides,
   };
 }

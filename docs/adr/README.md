@@ -19,6 +19,7 @@ Each file is `NNNN-short-kebab-title.md` and contains:
 | ------------------------------------------------ | --------------------------------------------------- | -------- | ----- |
 | [0001](0001-stack-and-foundation-choices.md)     | Stack and foundation choices                        | Accepted | 0     |
 | [0002](0002-database-schema-and-unique-index.md) | Database schema and the double-booking unique index | Accepted | 1     |
+| [0003](0003-authentication.md)                   | Authentication design                               | Accepted | 2     |
 
 ## When to write one
 

@@ -46,11 +46,17 @@ function normaliseError(error: unknown): AppError {
     return new ValidationError('Request validation failed');
   }
 
-  // Prisma surfaces database rule violations as typed errors. P2002 is our
-  // double-booking guard firing: two active rows tried to claim the same seat,
-  // which AGENTS.md defines as HTTP 409.
+  // Prisma surfaces database rule violations as typed errors. P2002 means some
+  // unique index rejected a write. The double-booking guard is the expected case
+  // in this system (AGENTS.md: seat conflict = 409); anything else is still a
+  // genuine client conflict, but gets a distinct code so it is not mistaken for
+  // a seat race.
   if (error instanceof Prisma.PrismaClientKnownRequestError && error.code === 'P2002') {
-    return new AppError('Seat conflict: the seat is already booked', 'SEAT_CONFLICT', 409);
+    const target = readUniqueTarget(error);
+    if (target?.includes('booking_seats')) {
+      return new AppError('Seat conflict: the seat is already booked', 'SEAT_CONFLICT', 409);
+    }
+    return new AppError('A record with these values already exists', 'UNIQUE_CONSTRAINT', 409);
   }
 
   const statusCode = extractStatusCode(error);
@@ -81,4 +87,16 @@ function extractStatusCode(error: unknown): number {
   }
   const candidate = (error as FastifyLikeError).statusCode;
   return typeof candidate === 'number' && candidate >= 400 && candidate <= 599 ? candidate : 500;
+}
+
+/** Reads Prisma's `meta.target` without trusting its shape (it is string | object). */
+function readUniqueTarget(error: Prisma.PrismaClientKnownRequestError): string | null {
+  const meta = error.meta as { target?: unknown } | undefined;
+  if (typeof meta?.target === 'string') {
+    return meta.target;
+  }
+  if (Array.isArray(meta?.target)) {
+    return meta.target.filter((part): part is string => typeof part === 'string').join(',');
+  }
+  return null;
 }
