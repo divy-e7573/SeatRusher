@@ -68,6 +68,15 @@ Copy-Item apps/api/.env.example apps/api/.env
 The example file already points at the default local credentials, so no edit is needed
 unless you changed the docker-compose defaults.
 
+Create the database schema and demo data (once, and after any schema change):
+
+```bash
+pnpm --filter api db:migrate   # creates tables from prisma/schema.prisma
+pnpm --filter api db:seed      # 1 venue, 1 screen, 150 seats, 3 shows
+```
+
+`db:seed` is idempotent - running it twice leaves exactly the same data.
+
 ---
 
 ## Starting the infrastructure
@@ -140,6 +149,10 @@ Run these from the repository root:
 | `pnpm dev`                          | Build `shared`, then run the API (4000) and web (3000) together. |
 | `pnpm --filter api dev`             | Run only the API with hot reload.                                |
 | `pnpm --filter web dev`             | Run only the web app with hot reload.                            |
+| `pnpm --filter api db:migrate`      | Create and apply a Prisma migration (dev database).              |
+| `pnpm --filter api db:seed`         | Seed demo data (idempotent, safe to re-run).                     |
+| `pnpm --filter api db:test:prepare` | Migrate + seed the isolated test database (run before tests).    |
+| `pnpm --filter api db:studio`       | Open Prisma Studio to browse the dev database.                   |
 | `pnpm lint`                         | ESLint over the whole workspace.                                 |
 | `pnpm typecheck`                    | TypeScript in strict mode for every package.                     |
 | `pnpm test`                         | Build `shared`, then run every package's tests.                  |
@@ -191,6 +204,40 @@ curl http://localhost:4000/health
 you get **HTTP 503** and `status: "degraded"`, and the body names the failing dependency.
 Every response carries an `x-request-id` header; quote it when reporting a problem, and
 grep for it in the API logs to find the exact request.
+
+### Browsing shows and seats
+
+With the API running and the database seeded:
+
+```bash
+curl http://localhost:4000/shows
+curl http://localhost:4000/shows/<show-id>
+curl http://localhost:4000/shows/<show-id>/seats
+```
+
+- `GET /shows` - all shows, soonest first, with prices and availability.
+- `GET /shows/:id` - one show plus its available-seat count (cached for 5 minutes).
+- `GET /shows/:id/seats` - the full seat map: rows, numbers, categories, prices and
+  `AVAILABLE` / `BOOKED` status. The static layout is cached with no TTL; seat status is
+  always read live from Postgres, so a cached response can never show a booked seat as
+  available.
+
+A malformed id returns **400 BAD_REQUEST** and an unknown id **404 NOT_FOUND**, both in
+the standard `{ error: { code, message, requestId } }` envelope.
+
+### The double-booking guarantee
+
+The database itself refuses to let two active bookings hold the same seat:
+
+```sql
+CREATE UNIQUE INDEX booking_seats_active_show_seat_key
+    ON booking_seats (show_id, seat_id)
+    WHERE status IN ('PENDING', 'CONFIRMED');
+```
+
+See [ADR 0002](docs/adr/0002-database-schema-and-unique-index.md) for why the booking
+status is denormalized onto `booking_seats` and why this index lives in a hand-written
+migration instead of `schema.prisma`.
 
 ---
 
@@ -270,8 +317,13 @@ first:
 
 ```bash
 docker compose up -d --wait
+pnpm --filter api db:test:prepare
 pnpm test
 ```
+
+Tests run against an **isolated Postgres schema** (`seatrush_test`) on the same database
+server, so they can create bookings to prove the double-booking constraint without
+touching your development data.
 
 To point the tests at non-default hosts or ports:
 

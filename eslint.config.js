@@ -45,6 +45,15 @@ export default tseslint.config(
     },
   },
 
+  // CLI entry points (seed, migration helpers): the console IS their output
+  // channel, so structured server logging does not apply to them.
+  {
+    files: ['apps/api/prisma/*.ts', 'apps/api/scripts/**/*.ts'],
+    rules: {
+      'no-console': 'off',
+    },
+  },
+
   // Keep ESLint's formatting concerns out of the way of Prettier.
   prettier,
 );

@@ -15,9 +15,10 @@ Each file is `NNNN-short-kebab-title.md` and contains:
 
 ## Index
 
-| #                                            | Title                        | Status   | Phase |
-| -------------------------------------------- | ---------------------------- | -------- | ----- |
-| [0001](0001-stack-and-foundation-choices.md) | Stack and foundation choices | Accepted | 0     |
+| #                                                | Title                                               | Status   | Phase |
+| ------------------------------------------------ | --------------------------------------------------- | -------- | ----- |
+| [0001](0001-stack-and-foundation-choices.md)     | Stack and foundation choices                        | Accepted | 0     |
+| [0002](0002-database-schema-and-unique-index.md) | Database schema and the double-booking unique index | Accepted | 1     |
 
 ## When to write one
 
