@@ -45,6 +45,20 @@ function connectionString(protocols: readonly string[]) {
     );
 }
 
+/**
+ * A signing secret. Rejects short values and the obvious placeholder strings, so
+ * a copy-pasted example value cannot reach production by accident.
+ */
+function secret() {
+  return z
+    .string()
+    .min(32, 'must be at least 32 characters long')
+    .refine(
+      (value) => !/^(change[-_ ]?me|replace[-_ ]?me|example|secret|password)/i.test(value),
+      'must not be a placeholder value',
+    );
+}
+
 const rawEnvSchema = z.object({
   NODE_ENV: z.enum(NODE_ENVIRONMENTS).default('development'),
   HOST: z.string().min(1, 'must not be empty').default('0.0.0.0'),
@@ -67,6 +81,42 @@ const rawEnvSchema = z.object({
     .min(100, 'must be >= 100')
     .max(30_000, 'must be <= 30000')
     .default(2000),
+
+  // --- Authentication (Phase 2) -------------------------------------------
+  // Secrets must be long and random. They are validated for a minimum length so a
+  // weak value fails at startup rather than silently signing forgeable tokens.
+  JWT_ACCESS_SECRET: secret(),
+  JWT_REFRESH_SECRET: secret(),
+  JWT_ISSUER: z.string().min(1, 'must not be empty').default('seatrush-api'),
+  JWT_ACCESS_TTL_SECONDS: z.coerce
+    .number()
+    .int('must be an integer')
+    .min(60, 'must be >= 60')
+    .max(3600, 'must be <= 3600')
+    .default(900),
+  JWT_REFRESH_TTL_SECONDS: z.coerce
+    .number()
+    .int('must be an integer')
+    .min(300, 'must be >= 300')
+    .max(2_592_000, 'must be <= 2592000')
+    .default(604800),
+  // Cookie `Secure` flag. MUST be true in production (the cookie then only travels
+  // over HTTPS). Left unset it is derived from NODE_ENV.
+  COOKIE_SECURE: z
+    .enum(['true', 'false'])
+    .optional()
+    .transform((value) => (value === undefined ? undefined : value === 'true')),
+  AUTH_RATE_LIMIT_MAX: z.coerce
+    .number()
+    .int('must be an integer')
+    .min(1, 'must be >= 1')
+    .max(10_000)
+    .default(20),
+  AUTH_RATE_LIMIT_WINDOW_MS: z.coerce
+    .number()
+    .int('must be an integer')
+    .min(1000, 'must be >= 1000')
+    .default(60_000),
 });
 
 const envSchema = rawEnvSchema.transform((env) => ({
@@ -79,6 +129,19 @@ const envSchema = rawEnvSchema.transform((env) => ({
   databaseUrl: env.DATABASE_URL,
   redisUrl: env.REDIS_URL,
   healthCheckTimeoutMs: env.HEALTH_CHECK_TIMEOUT_MS,
+  jwt: {
+    accessSecret: env.JWT_ACCESS_SECRET,
+    refreshSecret: env.JWT_REFRESH_SECRET,
+    issuer: env.JWT_ISSUER,
+    accessTtlSeconds: env.JWT_ACCESS_TTL_SECONDS,
+    refreshTtlSeconds: env.JWT_REFRESH_TTL_SECONDS,
+  },
+  /** Undefined means "derive from NODE_ENV": secure in production only. */
+  cookieSecure: env.COOKIE_SECURE,
+  authRateLimit: {
+    max: env.AUTH_RATE_LIMIT_MAX,
+    windowMs: env.AUTH_RATE_LIMIT_WINDOW_MS,
+  },
 }));
 
 /** Fully validated, camel-cased configuration consumed by the rest of the app. */
