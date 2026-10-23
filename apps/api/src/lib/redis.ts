@@ -31,15 +31,39 @@ export function createRedisClient(config: AppConfig): Redis {
 }
 
 /**
+ * Connects the lazy client on first use and memoises the in-flight attempt.
+ *
+ * With `lazyConnect`, every command issued before the first connection throws
+ * `Stream isn't writeable`. Rather than connecting eagerly at boot (which would
+ * make a Redis outage a startup problem), each subsystem that touches Redis
+ * calls this first. Concurrent first calls share one connection attempt, and a
+ * failed attempt is not cached so a later request can retry.
+ */
+export function ensureRedisConnected(client: Redis): Promise<void> {
+  if (client.status === 'ready') {
+    return Promise.resolve();
+  }
+  const pending = pendingConnects.get(client);
+  if (pending) {
+    return pending;
+  }
+  const attempt = client.connect().finally(() => {
+    pendingConnects.delete(client);
+  });
+  pendingConnects.set(client, attempt);
+  return attempt;
+}
+
+const pendingConnects = new WeakMap<Redis, Promise<void>>();
+
+/**
  * Proves Redis is reachable with a PING, connecting first if the client is idle.
  * Never throws, for the same reason as probePostgres.
  */
 export async function probeRedis(client: Redis, timeoutMs: number): Promise<DependencyHealth> {
   const startedAt = performance.now();
   try {
-    if (client.status === 'wait') {
-      await withTimeout(client.connect(), timeoutMs, 'Redis connect timed out');
-    }
+    await withTimeout(ensureRedisConnected(client), timeoutMs, 'Redis connect timed out');
     await withTimeout(client.ping(), timeoutMs, 'Redis probe timed out');
     return { status: DEPENDENCY_STATUS.UP, latencyMs: elapsedMs(startedAt) };
   } catch (error) {

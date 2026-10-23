@@ -8,26 +8,32 @@
     "node": ">=22.0.0"
   },
   "scripts": {
+    "postinstall": "prisma generate",
     "dev": "tsx watch --clear-screen=false src/index.ts",
     "build": "tsc -p tsconfig.build.json",
     "start": "node dist/index.js",
     "typecheck": "tsc -p tsconfig.json --noEmit",
+    "db:generate": "prisma generate",
+    "db:migrate": "prisma migrate dev",
+    "db:deploy": "prisma migrate deploy",
+    "db:seed": "tsx prisma/seed.ts",
+    "db:test:prepare": "tsx scripts/prepare-test-db.ts",
     "test": "vitest run",
     "test:watch": "vitest",
     "test:concurrency": "vitest run tests/concurrency --passWithNoTests"
   },
   "dependencies": {
+    "@prisma/client": "6.19.3",
     "dotenv": "18.0.9",
     "fastify": "5.12.7",
     "ioredis": "6.0.0",
-    "pg": "8.23.1",
     "pino": "10.4.0",
+    "prisma": "6.19.3",
     "shared": "workspace:*",
     "zod": "4.6.7"
   },
   "devDependencies": {
     "@types/node": "22.20.5",
-    "@types/pg": "8.23.1",
     "pino-pretty": "13.2.0",
     "tsx": "4.23.15",
     "typescript": "5.9.3",
